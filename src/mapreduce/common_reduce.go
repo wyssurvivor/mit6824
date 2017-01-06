@@ -38,7 +38,7 @@ func doReduce(
 	// }
 	// file.Close()
 	kvList:=make(map[string][]string)
-	kList:=make([]string,100)
+	kList:=make([]string,0)
 	for index:=0;index<nMap;index++ {
 		interFileName:=reduceName(jobName, index, reduceTaskNumber)
 		file,err:=os.Open(interFileName)
@@ -47,17 +47,18 @@ func doReduce(
 			panic(err)
 		}
 
-		kvs:=make([]KeyValue,10)
+		kvs:=make([]KeyValue,0)
 		decoder:=json.NewDecoder(file)
 		kv:=new(KeyValue)
-		for err = decoder.Decode(kv) {
+		for {
+			err=decoder.Decode(kv)
 			if err!=nil {
 				break
 			}
-			kvs=append(kvs,*kv)
-		}
-		if err!=nil {
-			panic(err)
+			if kv.Key!="" {
+				kvs=append(kvs,*kv)
+			}
+
 		}
 
 		for _,kv:=range kvs {
