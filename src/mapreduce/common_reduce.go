@@ -67,6 +67,8 @@ func doReduce(
 				valueList=append(valueList,kv.Value)
 				kvList[kv.Key]=valueList
 			} else {
+				valueList=make([]string,0)
+				valueList=append(valueList,kv.Value)
 				kvList[kv.Key]=valueList
 				kList=append(kList,kv.Key)
 			}
