@@ -34,11 +34,11 @@ func (mr *Master) schedule(phase jobPhase) {
 				arg:=DoTaskArgs{mr.jobName,mr.files[index],phase,index,nios}
 				res=call(worker,"Worker.DoTask",&arg,new(struct{}))
 				if res {
-					mr.registerChannel<-worker
-					fmt.Printf("%d stick worker %s backinto registerChannel \n",index,worker)
+					//必须先把true添加到finish这个channel中，现在下面程序会卡在下一句。
+					//因为registerChannel是一个只有一个空间的channel，相当于一个锁，最后一个worker执行完最后一个task会卡在这里。
+					//我在想这是不是这个mapreduce框架的一个bug
 					finish<- true
-					fmt.Printf("%d stick finish channel \n",index)
-
+					mr.registerChannel<-worker
 				} else {
 					fmt.Printf("phase %s,task %d failed",phase,index)
 				}
@@ -52,34 +52,6 @@ func (mr *Master) schedule(phase jobPhase) {
 	}
 
 
-	//signals := make(chan bool, ntasks)
-	//for i:=0; i < ntasks; i++{
-	//
-	//	// must save i to a local variable
-	//	taskIdx := i
-	//	go func(){
-	//		ok := false
-	//		for !ok {
-	//			// get a free worker
-	//			worker := <-mr.registerChannel
-	//			// rpc call to finish job
-	//			args := DoTaskArgs{mr.jobName, mr.files[taskIdx], phase, taskIdx, nios}
-	//			ok = call(worker, "Worker.DoTask", &args, new(struct{}))
-	//			if !ok {
-	//				fmt.Printf("fail: %v %v tasks (%d I/Os)\n", taskIdx, phase, nios)
-	//			}else {
-	//				signals <- true
-	//				// return the free worke
-	//				mr.registerChannel <- worker
-	//			}
-	//		}
-	//	}()
-	//}
-	//
-	//// sync
-	//for i:=0; i < ntasks; i++{
-	//	<- signals
-	//}
 
 	fmt.Printf("Schedule: %v phase done\n", phase)
 }
