@@ -18,12 +18,32 @@ package raft
 //
 
 import "sync"
-import "labrpc"
+import (
+	"../labrpc"
+	"log"
+	"bytes"
+	"encoding/gob"
+	"github.com/nsf/termbox-go"
+	"time"
+	"math/rand"
+)
 
 // import "bytes"
 // import "encoding/gob"
 
 
+type ServerState int
+
+const (
+	Follower = iota
+	Candidate
+	Leader
+)
+
+type LogEntry struct {
+	Term		int
+	Command		interface{}
+}
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -46,6 +66,29 @@ type Raft struct {
 	persister *Persister
 	me        int // index into peers[]
 
+	applyCh chan 	ApplyMsg
+	chaseMu		sync.Mutex
+
+	//persistent state on all servers
+	CurrentTerm	int
+	VotedFor	int
+	Logs		[]LogEntry
+	CurrentIndex	int
+
+	//volatile state on al servers
+	CommitedIndex	int
+	LastApplied	int
+
+	//reinitialized after election
+	NextIndex	[]int
+	MatchIndex	[]int
+
+	Sstate		ServerState
+	stateCh		chan ServerState
+	ElectionTimeout		int
+	HeartBeatTimeout	int
+
+
 	// Your data here.
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -59,6 +102,13 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here.
+
+	term = rf.CurrentTerm
+	if rf.Sstate == Leader {
+		isleader = true;
+	} else {
+		isleader = false;
+	}
 	return term, isleader
 }
 
@@ -76,6 +126,19 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	w:=new(bytes.Buffer)
+	e:=gob.NewEncoder(w)
+	e.Encode(rf.CurrentTerm)
+	e.Encode(rf.VotedFor)
+	e.Encode(rf.Logs)
+	e.Encode(rf.CurrentIndex)
+	e.Encode(rf.CommitedIndex)
+	e.Encode(rf.LastApplied)
+
+	rf.persister.SaveRaftState(w.Bytes())
 }
 
 //
@@ -88,6 +151,21 @@ func (rf *Raft) readPersist(data []byte) {
 	// d := gob.NewDecoder(r)
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
+	if len(data) == 0 {
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	r:=bytes.NewBuffer(data)
+	d:=gob.NewDecoder(r)
+	d.Decode(&rf.CurrentTerm)
+	d.Decode(&rf.VotedFor)
+	d.Decode(&rf.Logs)
+	d.Decode(&rf.CurrentIndex)
+	d.Decode(&rf.CommitedIndex)
+	d.Decode(&rf.LastApplied)
 }
 
 
@@ -98,6 +176,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here.
+	Term		int
+	CandidateId	int
+	LastLogIndex	int
+	LastLogTerm	int
 }
 
 //
@@ -105,6 +187,9 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here.
+
+	Term		int
+	VoteGranted	bool
 }
 
 //
@@ -112,6 +197,30 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
+	if !rf.checkAndUpdate(args.Term) {
+		reply.VoteGranted = false
+		return
+	}
+
+	reply.Term=rf.currentTerm
+	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
+		thisLastIndex := len(rf.logs)-1
+		thisLastTerm := rf.logs[thisLastIndex].Term
+		if args.LastLogTerm < thisLastTerm {
+			reply.VoteGranted = false
+			return
+		} else if args.LastLogTerm == thisLastTerm {
+			if args.LastLogIndex < thisLastIndex {
+				reply.VoteGranted = false
+			} else {
+				reply.VoteGranted = true
+			}
+		} else {
+			reply.VoteGranted = true
+		}
+	}
+
+	return
 }
 
 //
@@ -169,6 +278,72 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
+func (rf *Raft) checkAndUpdate(term int) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock() //???? needs add lock?
+	if term<rf.CurrentTerm {
+		return false
+	} else {
+		rf.CurrentTerm = term
+		rf.Sstate = Follower
+		return true
+	}
+}
+
+//this function should be executed in a single goroutine and only that goroutine
+//can execute this func
+func (rf *Raft) applyLogEntry() {
+	for {
+		time.Sleep(time.Millisecond*100)
+		rf.chaseMu.Lock()
+
+		if(rf.LastApplied<rf.CommitedIndex) {
+			logentry := rf.Logs[rf.LastApplied+1]
+			msg := new(ApplyMsg)
+			msg.Command = logentry.Command
+			msg.Index = rf.LastApplied+1
+			msg.UseSnapshot = false
+			rf.applyCh <- *msg
+			rf.LastApplied++
+		}
+
+		rf.chaseMu.Unlock()
+	}
+}
+
+func (rf *Raft) switchToCandidate() {
+	rf.CurrentTerm++
+	rf.VotedFor = rf.me
+	rf.resetElectionTimeout()
+	for index,_:=range  rf.peers {
+		if index == rf.me {
+			continue
+		}
+		voteArgs:=RequestVoteArgs{}
+		voteArgs.CandidateId=rf.me
+		voteArgs.Term=rf.CurrentTerm
+		voteArgs.LastLogIndex=rf.CurrentIndex
+		voteArgs.LastLogTerm=rf.Logs[rf.CurrentIndex].Term
+		rf.sendRequestVote(index, voteArgs, new(RequestVoteReply))
+
+	}
+}
+
+func (rf *Raft) serverStateMonite() {
+	for {
+		time.Sleep(time.Millisecond*5)
+		rf.ElectionTimeout = rf.ElectionTimeout-5
+		if rf.ElectionTimeout <= 0 {
+
+		}
+	}
+}
+
+func (rf *Raft) resetElectionTimeout() {
+	rf.ElectionTimeout = rand.Intn(2000) + 5000
+}
+
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -187,11 +362,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
+	rf.applyCh = applyCh
+
 	// Your initialization code here.
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	go func() {
+		rf.applyLogEntry()
+	}()
 
 	return rf
 }
