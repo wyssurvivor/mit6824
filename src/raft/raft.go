@@ -86,7 +86,9 @@ type Raft struct {
 	Sstate		ServerState
 	stateCh		chan ServerState
 	ElectionTimeout		int
+	ElectionTimestamp	int64
 	HeartBeatTimeout	int
+
 
 
 	// Your data here.
@@ -192,6 +194,19 @@ type RequestVoteReply struct {
 	VoteGranted	bool
 }
 
+type AppendEntryArgs struct {
+	Term 		int
+	LeaderId	int
+	PrevLogIndex	int
+	Entries		[]LogEntry
+	LeaderCommit	int
+}
+
+type AppendEntryReply struct {
+	Term 		int
+	Success		bool
+}
+
 //
 // example RequestVote RPC handler.
 //
@@ -202,10 +217,10 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	reply.Term=rf.currentTerm
-	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
-		thisLastIndex := len(rf.logs)-1
-		thisLastTerm := rf.logs[thisLastIndex].Term
+	reply.Term=rf.CurrentTerm
+	if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId {
+		thisLastIndex := len(rf.Logs)-1
+		thisLastTerm := rf.Logs[thisLastIndex].Term
 		if args.LastLogTerm < thisLastTerm {
 			reply.VoteGranted = false
 			return
@@ -245,6 +260,11 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	return ok
 }
 
+func (rf *Raft) sendAppendEntry(server int, args AppendEntryArgs, reply *AppendEntryReply) bool {
+	ok:= rf.peers[server].Call("Raft.AppendEntry", args, reply)
+	return ok
+}
+
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -278,70 +298,7 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
-func (rf *Raft) checkAndUpdate(term int) bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock() //???? needs add lock?
-	if term<rf.CurrentTerm {
-		return false
-	} else {
-		rf.CurrentTerm = term
-		rf.Sstate = Follower
-		return true
-	}
-}
 
-//this function should be executed in a single goroutine and only that goroutine
-//can execute this func
-func (rf *Raft) applyLogEntry() {
-	for {
-		time.Sleep(time.Millisecond*100)
-		rf.chaseMu.Lock()
-
-		if(rf.LastApplied<rf.CommitedIndex) {
-			logentry := rf.Logs[rf.LastApplied+1]
-			msg := new(ApplyMsg)
-			msg.Command = logentry.Command
-			msg.Index = rf.LastApplied+1
-			msg.UseSnapshot = false
-			rf.applyCh <- *msg
-			rf.LastApplied++
-		}
-
-		rf.chaseMu.Unlock()
-	}
-}
-
-func (rf *Raft) switchToCandidate() {
-	rf.CurrentTerm++
-	rf.VotedFor = rf.me
-	rf.resetElectionTimeout()
-	for index,_:=range  rf.peers {
-		if index == rf.me {
-			continue
-		}
-		voteArgs:=RequestVoteArgs{}
-		voteArgs.CandidateId=rf.me
-		voteArgs.Term=rf.CurrentTerm
-		voteArgs.LastLogIndex=rf.CurrentIndex
-		voteArgs.LastLogTerm=rf.Logs[rf.CurrentIndex].Term
-		rf.sendRequestVote(index, voteArgs, new(RequestVoteReply))
-
-	}
-}
-
-func (rf *Raft) serverStateMonite() {
-	for {
-		time.Sleep(time.Millisecond*5)
-		rf.ElectionTimeout = rf.ElectionTimeout-5
-		if rf.ElectionTimeout <= 0 {
-
-		}
-	}
-}
-
-func (rf *Raft) resetElectionTimeout() {
-	rf.ElectionTimeout = rand.Intn(2000) + 5000
-}
 
 
 //
@@ -374,4 +331,123 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}()
 
 	return rf
+}
+
+
+
+// my code below
+
+
+func (rf *Raft) serverStateMonite() {
+	for {
+		time.Sleep(time.Millisecond*5)
+		rf.ElectionTimeout = rf.ElectionTimeout-5
+		if rf.ElectionTimeout <= 0&&rf.Sstate!=Leader {
+			rf.resetElectionTimeout()
+			rf.switchToCandidate(rf.ElectionTimeout)
+		}
+	}
+}
+
+//this function should be executed in a single goroutine and only that goroutine
+//can execute this func
+func (rf *Raft) applyLogEntry() {
+	for {
+		time.Sleep(time.Millisecond*100)
+		rf.chaseMu.Lock()
+
+		if(rf.LastApplied<rf.CommitedIndex) {
+			logentry := rf.Logs[rf.LastApplied+1]
+			msg := new(ApplyMsg)
+			msg.Command = logentry.Command
+			msg.Index = rf.LastApplied+1
+			msg.UseSnapshot = false
+			rf.applyCh <- *msg
+			rf.LastApplied++
+		}
+
+		rf.chaseMu.Unlock()
+	}
+}
+
+func (rf *Raft) switchToCandidate(electionTimeout int) {
+	rf.CurrentTerm++
+	rf.VotedFor = rf.me
+	rf.resetElectionTimeout()
+	rvChan:=make(chan *RequestVoteReply ,len(rf.peers)-1)
+	termTmp:=rf.CurrentTerm
+	for index,_:=range  rf.peers {
+		if index == rf.me {
+			continue
+		}
+		go func(){
+			voteArgs:=RequestVoteArgs{}
+			voteArgs.CandidateId=rf.me
+			voteArgs.Term=rf.CurrentTerm
+			voteArgs.LastLogIndex=rf.CurrentIndex
+			voteArgs.LastLogTerm=rf.Logs[rf.CurrentIndex].Term
+			reply:=new(RequestVoteReply)
+			rf.sendRequestVote(index, voteArgs, reply)
+			rvChan<-reply
+		}()
+	}
+
+	totalVote:=1//vote itself
+
+	for iter:=0;iter<len(rf.peers)-1;iter++ {
+		reply:=<-rvChan
+		if rf.checkAndUpdate(reply.Term) {
+			return
+		}
+		if reply.VoteGranted {
+			totalVote++
+		}
+	}
+
+	if termTmp == rf.CurrentTerm {
+		rf.mu.Lock()
+		defer  rf.mu.Unlock()
+		if termTmp < rf.CurrentTerm {
+			return
+		}
+
+		if totalVote>len(rf.peers)/2 {
+			rf.Sstate = Leader
+			rf.sendHeartBeatToAllOthers()
+		}
+	}
+
+
+
+}
+
+func (rf *Raft) sendHeartBeatToAllOthers() {
+	for i:=0;i<len(rf.peers);i++ {
+		if i!=rf.me {
+			continue
+		}
+
+		args:=AppendEntryArgs{}
+		args.Term = rf.CurrentTerm
+		args.LeaderId = rf.me
+		args.PrevLogIndex = 0
+		args.LeaderCommit = rf.CommitedIndex
+		rf.sendAppendEntry(i, args, new(AppendEntryReply))
+	}
+}
+
+func (rf *Raft) checkAndUpdate(term int) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock() //???? needs add lock?
+	if term<rf.CurrentTerm {
+		return false
+	} else {
+		rf.CurrentTerm = term
+		rf.Sstate = Follower
+		return true
+	}
+}
+
+func (rf *Raft) resetElectionTimeout() {
+	rf.ElectionTimeout = rand.Intn(2000) + 5000
 }
