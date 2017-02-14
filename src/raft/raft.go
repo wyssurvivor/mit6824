@@ -205,30 +205,39 @@ type AppendEntryReply struct {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
-	if rf.checkAndUpdate(args.Term) {
-		reply.VoteGranted = false
-		return
-	}
-
 	reply.Term = rf.CurrentTerm
-	if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId {
-		thisLastIndex := len(rf.Logs) - 1
-		thisLastTerm := rf.Logs[thisLastIndex].Term
-		if args.LastLogTerm < thisLastTerm {
-			reply.VoteGranted = false
-			return
-		} else if args.LastLogTerm == thisLastTerm {
-			if args.LastLogIndex < thisLastIndex {
+	if rf.CurrentTerm < args.Term {// service term < args term , return true
+		rf.CurrentTerm = args.Term
+		rf.Sstate = Follower
+		reply.VoteGranted = true
+		return
+	} else if rf.CurrentTerm == args.Term {
+		if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId {
+			thisLastIndex:=len(rf.Logs) -1
+			thisLastTerm:=rf.Logs[thisLastIndex].Term
+			if args.LastLogTerm < thisLastTerm {
 				reply.VoteGranted = false
+			} else if args.LastLogTerm == thisLastTerm {
+				if args.LastLogIndex < thisLastIndex {
+					reply.VoteGranted = false
+				} else {
+					reply.VoteGranted = true
+				}
 			} else {
 				reply.VoteGranted = true
 			}
 		} else {
-			reply.VoteGranted = true
+			reply.VoteGranted = false
 		}
+	} else {
+
+		reply.VoteGranted = false
 	}
 
-	return
+}
+
+func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
+
 }
 
 //
@@ -279,8 +288,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
-	
 
+	go func(){
+		rf.applyLogEntry()
+	}()
+
+	go func(){
+		rf.serverStateMonite()
+	}()
 	return index, term, isLeader
 }
 
