@@ -191,6 +191,7 @@ type AppendEntryArgs struct {
 	Term         int
 	LeaderId     int
 	PrevLogIndex int
+	PrevLogTerm  int
 	Entries      []LogEntry
 	LeaderCommit int
 }
@@ -205,11 +206,15 @@ type AppendEntryReply struct {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
+	rf.mu.Lock()
+	defer  rf.mu.Unlock()
 	reply.Term = rf.CurrentTerm
 	if rf.CurrentTerm < args.Term {// service term < args term , return true
 		rf.CurrentTerm = args.Term
-		rf.Sstate = Follower
+		//rf.Sstate = Follower
 		reply.VoteGranted = true
+		rf.VotedFor = args.CandidateId
+
 		return
 	} else if rf.CurrentTerm == args.Term {
 		if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId {
@@ -234,10 +239,37 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 	}
 
+	if reply.VoteGranted == true {
+		rf.resetElectionTimeout() //grante vote , reset election timeout
+	}
+
 }
 
 func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
+	reply.Term = rf.CurrentTerm
+	reply.Success = true
+	if rf.CurrentTerm <= args.Term {
+		rf.mu.Lock()
+		if rf.Sstate == Candidate {
+			rf.Sstate = Follower
+		}
+		rf.mu.Unlock()
 
+		if args.PrevLogIndex>=0 && args.PrevLogIndex <=rf.CurrentIndex {
+			if rf.Logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+				reply.Success = false
+			}
+		} else {
+			reply.Success = false
+		}
+
+		if len(args.Entries)>0 {
+			
+		}
+
+	} else {
+		reply.Success = false
+	}
 }
 
 //
@@ -416,7 +448,9 @@ func (rf *Raft) switchToCandidate() {
 
 	for iter := 0; iter < len(rf.peers)-1; iter++ {
 		reply := <-rvChan
-		if !rf.checkAndUpdate(reply.Term) {
+		if reply.Term>rf.CurrentTerm {
+			rf.CurrentTerm = reply.Term
+			rf.Sstate = Follower
 			return
 		}
 		if reply.VoteGranted {
@@ -427,7 +461,7 @@ func (rf *Raft) switchToCandidate() {
 	if termTmp == rf.CurrentTerm && rf.Sstate != Leader {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		if termTmp < rf.CurrentTerm && rf.Sstate != Leader {
+		if termTmp < rf.CurrentTerm || rf.Sstate == Leader {
 			return
 		}
 
@@ -451,6 +485,7 @@ func (rf *Raft) sendHeartBeatToAllOthers() {
 			args.Term = rf.CurrentTerm
 			args.LeaderId = rf.me
 			args.PrevLogIndex = 0
+			args.PrevLogTerm = rf.Logs[args.PrevLogIndex].Term
 			args.LeaderCommit = rf.CommitedIndex
 			rf.sendAppendEntry(index, args, new(AppendEntryReply))
 		}()
