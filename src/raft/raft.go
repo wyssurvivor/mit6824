@@ -206,69 +206,85 @@ type AppendEntryReply struct {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
-	rf.mu.Lock()
-	defer  rf.mu.Unlock()
 	reply.Term = rf.CurrentTerm
-	if rf.CurrentTerm < args.Term {// service term < args term , return true
-		rf.CurrentTerm = args.Term
-		//rf.Sstate = Follower
-		reply.VoteGranted = true
-		rf.VotedFor = args.CandidateId
+	voteResult:=false
+	stateTransfer:=false
 
-		return
-	} else if rf.CurrentTerm == args.Term {
-		if rf.VotedFor == -1 || rf.VotedFor == args.CandidateId {
-			thisLastIndex:=len(rf.Logs) -1
+	if args.Term>rf.CurrentTerm {
+		voteResult=true
+		stateTransfer=true
+	} else if args.Term == rf.CurrentTerm {
+		if rf.VotedFor!=-1 || rf.VotedFor == args.CandidateId {
+			thisLastIndex:=len(rf.Logs)-1
 			thisLastTerm:=rf.Logs[thisLastIndex].Term
-			if args.LastLogTerm < thisLastTerm {
-				reply.VoteGranted = false
-			} else if args.LastLogTerm == thisLastTerm {
-				if args.LastLogIndex < thisLastIndex {
-					reply.VoteGranted = false
-				} else {
-					reply.VoteGranted = true
+			if thisLastTerm<args.LastLogTerm {
+				voteResult = true
+			} else if thisLastTerm == args.LastLogTerm {
+				if thisLastIndex<=args.LastLogIndex {
+					voteResult = true
 				}
-			} else {
-				reply.VoteGranted = true
 			}
-		} else {
-			reply.VoteGranted = false
 		}
-	} else {
-
-		reply.VoteGranted = false
 	}
 
-	if reply.VoteGranted == true {
-		rf.resetElectionTimeout() //grante vote , reset election timeout
+	reply.VoteGranted = voteResult
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if voteResult == true {
+		rf.VotedFor = args.CandidateId
+		rf.resetElectionTimeout()
 	}
 
+	if stateTransfer == true {
+		rf.CurrentTerm = args.Term
+		rf.Sstate = Follower
+	}
+
+	return
 }
 
 func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
-	reply.Term = rf.CurrentTerm
-	reply.Success = true
-	if rf.CurrentTerm <= args.Term {
-		rf.mu.Lock()
-		if rf.Sstate == Candidate {
-			rf.Sstate = Follower
-		}
-		rf.mu.Unlock()
 
+	reply.Term = rf.CurrentTerm
+	if args.Term<rf.CurrentTerm {
+		reply.Success=false
+		return
+	} else {
+		rf.CurrentTerm = args.Term
+		rf.Sstate = Follower
 		if args.PrevLogIndex>=0 && args.PrevLogIndex <=rf.CurrentIndex {
 			if rf.Logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 				reply.Success = false
+				return
 			}
 		} else {
 			reply.Success = false
+			return
 		}
 
-		if len(args.Entries)>0 {
-			
+		newLogsIndex:=0
+		i:=args.PrevLogIndex
+		for ;i<rf.CurrentIndex&&newLogsIndex<len(args.Entries);i++ {
+			newLogsIndex++
+			if rf.Logs[i].Term!=args.Entries[newLogsIndex].Term {
+				break
+			}
+		}
+		//todo delete entries following
+		for ;i<rf.CurrentTerm&&newLogsIndex<len(args.Entries);i++ {
+			newLogsIndex++
+			rf.Logs[i]=args.Entries[newLogsIndex]
 		}
 
-	} else {
-		reply.Success = false
+		if args.LeaderCommit>rf.CommitedIndex {
+			if args.LeaderCommit<len(rf.Logs)-1 {
+				rf.CommitedIndex = args.LeaderCommit
+			} else {
+				rf.CommitedIndex = len(rf.Logs)-1
+			}
+		}
+		reply.Success = true
+		return
 	}
 }
 
@@ -504,9 +520,8 @@ func (rf *Raft) checkAndUpdate(term int) bool {
 	}
 }
 
+// need to add locks beyond this function
 func (rf *Raft) resetElectionTimeout() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	rf.ElectionTimeout = rand.Intn(400) + 500
 	rf.ElectionTimestamp = getMilliSeconds()
 }
