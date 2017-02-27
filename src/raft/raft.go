@@ -250,9 +250,11 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 		reply.Success=false
 		return
 	} else {
-		rf.CurrentTerm = args.Term
-		rf.Sstate = Follower
-		if args.PrevLogIndex>=0 && args.PrevLogIndex <=rf.CurrentIndex {
+		if args.Term > rf.CurrentTerm {
+			rf.CurrentTerm = args.Term
+			rf.Sstate = Follower
+		}
+		if args.PrevLogIndex>0 && args.PrevLogIndex <=rf.CurrentIndex {
 			if rf.Logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 				reply.Success = false
 				return
@@ -270,7 +272,12 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 				break
 			}
 		}
-		//todo delete entries following
+
+		rf.mu.Lock()
+		rf.mu.Unlock()
+
+		rf.Logs = rf.Logs[0:i] //delete entries following
+		rf.CurrentIndex=len(rf.Logs)-1
 		for ;i<rf.CurrentTerm&&newLogsIndex<len(args.Entries);i++ {
 			newLogsIndex++
 			rf.Logs[i]=args.Entries[newLogsIndex]
