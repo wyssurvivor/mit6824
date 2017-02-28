@@ -85,7 +85,7 @@ type Raft struct {
 
 	Sstate            ServerState
 	ElectionTimeout   int
-	ElectionTimestamp int64
+	heartBeatCh chan int
 	HeartBeatTimeout  int
 
 	// Your data here.
@@ -206,6 +206,9 @@ type AppendEntryReply struct {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	reply.Term = rf.CurrentTerm
 	voteResult:=false
 	stateTransfer:=false
@@ -214,7 +217,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		voteResult=true
 		stateTransfer=true
 	} else if args.Term == rf.CurrentTerm {
-		if rf.VotedFor!=-1 || rf.VotedFor == args.CandidateId {
+		if rf.VotedFor<0 || rf.VotedFor == args.CandidateId {
 			thisLastIndex:=len(rf.Logs)-1
 			thisLastTerm:=rf.Logs[thisLastIndex].Term
 			if thisLastTerm<args.LastLogTerm {
@@ -228,13 +231,12 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	reply.VoteGranted = voteResult
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if voteResult == true {
 		rf.VotedFor = args.CandidateId
-		rf.resetElectionTimeout()
+		rf.heartBeatCh<-1
 	}
 
+	// not sure if I need to switch role to follower
 	if stateTransfer == true {
 		rf.CurrentTerm = args.Term
 		rf.Sstate = Follower
@@ -244,7 +246,11 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
+	//todo: add locks on function level is not a good way
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	rf.heartBeatCh<-1
 	reply.Term = rf.CurrentTerm
 	if args.Term<rf.CurrentTerm {
 		reply.Success=false
@@ -273,8 +279,7 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 			}
 		}
 
-		rf.mu.Lock()
-		rf.mu.Unlock()
+
 
 		rf.Logs = rf.Logs[0:i] //delete entries following
 		rf.CurrentIndex=len(rf.Logs)-1
@@ -396,7 +401,8 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf.NextIndex = make([]int,len(peers))
 	rf.MatchIndex = make([]int, len(peers))
 
-	rf.Sstate = Candidate
+	rf.Sstate = Follower
+	rf.heartBeatCh = make(chan int)
 	rf.resetElectionTimeout()
 
 	// Your initialization code here.
@@ -410,10 +416,12 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 // my code below
 
 func (rf *Raft) serverStateMonite() {
+
 	for {
-		currentMillis := getMilliSeconds()
-		interval := currentMillis - rf.ElectionTimestamp
-		if interval > int64(rf.ElectionTimeout) && rf.Sstate != Leader {
+		select {
+		case <-rf.heartBeatCh:
+			rf.resetElectionTimeout()
+		case <-time.After(time.Millisecond * time.Duration(rf.ElectionTimeout)):
 			rf.switchToCandidate()
 		}
 	}
@@ -441,13 +449,15 @@ func (rf *Raft) applyLogEntry() {
 }
 
 func (rf *Raft) switchToCandidate() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.Sstate == Leader {
 		return
 	}
 	rf.Sstate = Candidate
 	rf.CurrentTerm++
 	rf.VotedFor = rf.me
-	rf.resetElectionTimeout()
+	//rf.resetElectionTimeout()
 	rvChan := make(chan *RequestVoteReply, len(rf.peers) - 1)
 	termTmp := rf.CurrentTerm
 	for index, _ := range rf.peers {
@@ -530,7 +540,7 @@ func (rf *Raft) checkAndUpdate(term int) bool {
 // need to add locks beyond this function
 func (rf *Raft) resetElectionTimeout() {
 	rf.ElectionTimeout = rand.Intn(400) + 500
-	rf.ElectionTimestamp = getMilliSeconds()
+	//rf.ElectionTimestamp = getMilliSeconds()
 }
 
 func getMilliSeconds() int64 {
