@@ -1,30 +1,30 @@
 package raft
 
+import "time"
 
-const APPEND_ENTRY_TIMEOUT = 100 // must be smaller than ElectionTimeout,or a follower will switch to candidate
+const LEADER_HEARTBEAT_TIMEOUT = 300 // must be smaller than ElectionTimeout,or a follower will switch to candidate
 
-func (rf *Raft) leaderSendAppendEntries(logs []LogEntry,prevLogIndex int, prevLogTerm int) {
-	args := AppendEntryArgs{}
-	args.Term = rf.CurrentTerm
-	args.LeaderId = rf.me
-	args.Entries = logs
-	args.PrevLogIndex = prevLogIndex
-	args.PrevLogTerm = prevLogTerm
-
-	lastLogIndex:=args.PrevLogIndex+len(logs)
-
-	countCh:=make(chan int ,len(rf.peers)/2+1)
-	countCh<-1//the leader itself
+func (rf *Raft) leaderSendAppendEntries() {
+	countCh:=make(chan int ,len(rf.peers))
 
 	for index,_:=range rf.peers {
 		if index == rf.me {
 			continue
 		}
 		peerIndex:=index
+
 		go func(){
 			reply:=new(AppendEntryReply)
 			appendResult:=false
 			for   {
+				args:=AppendEntryArgs{}
+				args.Term = rf.CurrentTerm
+				args.LeaderId = rf.me
+				args.Entries = rf.Logs[rf.NextIndex[peerIndex]:]
+				args.PrevLogIndex = rf.NextIndex[peerIndex]-1
+				args.PrevLogTerm = rf.Logs[args.PrevLogIndex].Term
+				args.LeaderCommit = rf.CommitedIndex
+
 				appendResult = rf.sendAppendEntry(peerIndex,args, reply)
 				if !appendResult { //if request failed,send request again directly
 					continue
@@ -36,12 +36,10 @@ func (rf *Raft) leaderSendAppendEntries(logs []LogEntry,prevLogIndex int, prevLo
 				} else {
 					if reply.Success {//if replicate on follower peerIndex succeed,update matchIndex\nextIndex and send 1 to countCH
 						rf.updateNextIndexAndMatchIndex(args.PrevLogIndex+len(args.Entries), peerIndex)
-						countCh<-1
+						countCh<-rf.MatchIndex[peerIndex]
 						break
-					} else { // if failed,minus prevLogIndex and update entries field of args and send request again
-						args.PrevLogIndex = args.PrevLogIndex-1
-						args.PrevLogTerm = rf.Logs[args.PrevLogIndex].Term
-						args.Entries = rf.Logs[args.PrevLogIndex+1:lastLogIndex]
+					} else { // if failed,decret nextIndex and retry.no need to add locks here
+						rf.NextIndex[peerIndex] = rf.NextIndex[peerIndex]-1
 					}
 				}
 			}
@@ -49,12 +47,15 @@ func (rf *Raft) leaderSendAppendEntries(logs []LogEntry,prevLogIndex int, prevLo
 		}()
 	}
 
-	totalReplicated := 0
-	for count:=1;count<len(rf.peers)/2+1;count++ { //count replicated numbers
-		totalReplicated += <-countCh
+	smallestReplicatedIndex :=0
+	for count:=1;count<len(rf.peers)/2;count++ { //if a majority of  followers appendentry succeed,get the smallest matchindex
+		replicatedIndex:=<-countCh
+		if replicatedIndex<smallestReplicatedIndex {
+			smallestReplicatedIndex = replicatedIndex
+		}
 	}
 
-	rf.updateCommitIndex(lastLogIndex)
+	rf.updateCommitIndex(smallestReplicatedIndex)
 
 }
 
@@ -70,8 +71,16 @@ func (rf *Raft) updateNextIndexAndMatchIndex(matchIndex int,peerIndex int ) {
 func (rf *Raft) updateCommitIndex(index int) {
 	rf.mu.Lock()
 
-	if index>rf.CommitedIndex && rf.Logs[index].Term == rf.CurrentTerm{
+	if index>rf.CommitedIndex && rf.Logs[index].Term == rf.CurrentTerm{ //if index is bigger than committedInde now and term is equal
 		rf.CommitedIndex = index
 	}
 	rf.mu.Unlock()
+}
+
+// run this function in a single goroutine when a server is switched to leader
+func (rf *Raft) leaderCron() {
+	select {
+	case <-time.After(time.Millisecond*time.Duration(LEADER_HEARTBEAT_TIMEOUT)):
+		rf.leaderSendAppendEntries()
+	}
 }
