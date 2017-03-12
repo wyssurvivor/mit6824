@@ -16,7 +16,8 @@ func (rf *Raft) switchToLeader() {
 	}()
 }
 
-func (rf *Raft) switchToFollower() {
+func (rf *Raft) switchToFollower(term int) {
+	rf.CurrentTerm = term
 	rf.Sstate = Follower
 	go func() {
 		rf.FollowerCron()

@@ -73,7 +73,7 @@ type Raft struct {
 	CurrentTerm  int
 	VotedFor     int //initialized to be -1
 	Logs         []LogEntry
-	CurrentIndex int
+
 
 	//volatile state on al servers
 	CommitedIndex int
@@ -132,7 +132,6 @@ func (rf *Raft) persist() {
 	e.Encode(rf.CurrentTerm)
 	e.Encode(rf.VotedFor)
 	e.Encode(rf.Logs)
-	e.Encode(rf.CurrentIndex)
 	e.Encode(rf.CommitedIndex)
 	e.Encode(rf.LastApplied)
 
@@ -161,7 +160,6 @@ func (rf *Raft) readPersist(data []byte) {
 	d.Decode(&rf.CurrentTerm)
 	d.Decode(&rf.VotedFor)
 	d.Decode(&rf.Logs)
-	d.Decode(&rf.CurrentIndex)
 	d.Decode(&rf.CommitedIndex)
 	d.Decode(&rf.LastApplied)
 }
@@ -211,11 +209,9 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 	reply.Term = rf.CurrentTerm
 	voteResult:=false
-	stateTransfer:=false
 
 	if args.Term>rf.CurrentTerm {
 		voteResult=true
-		stateTransfer=true
 	} else if args.Term == rf.CurrentTerm {
 		if rf.VotedFor<0 || rf.VotedFor == args.CandidateId {
 			thisLastIndex:=len(rf.Logs)-1
@@ -236,12 +232,6 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		rf.heartBeatCh<-1
 	}
 
-	// not sure if I need to switch role to follower
-	if stateTransfer == true {
-		rf.CurrentTerm = args.Term
-		rf.Sstate = Follower
-	}
-
 	return
 }
 
@@ -257,11 +247,8 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 		return
 	} else {
 		rf.heartBeatCh<-1
-		if args.Term > rf.CurrentTerm {
-			rf.CurrentTerm = args.Term
-			rf.Sstate = Follower
-		}
-		if args.PrevLogIndex>0 && args.PrevLogIndex <=rf.CurrentIndex {
+
+		if args.PrevLogIndex>0 && args.PrevLogIndex <len(rf.Logs) {
 			if rf.Logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 				reply.Success = false
 				return
@@ -273,7 +260,7 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 
 		newLogsIndex:=0
 		i:=args.PrevLogIndex
-		for ;i<rf.CurrentIndex&&newLogsIndex<len(args.Entries);i++ {
+		for ;i<len(rf.Logs)&&newLogsIndex<len(args.Entries);i++ {
 			newLogsIndex++
 			if rf.Logs[i].Term!=args.Entries[newLogsIndex].Term {
 				break
@@ -282,9 +269,8 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 
 
 
-		rf.Logs = rf.Logs[0:i] //delete entries following
-		rf.CurrentIndex=len(rf.Logs)-1
-		for ;i<rf.CurrentTerm&&newLogsIndex<len(args.Entries);i++ {
+		rf.Logs = rf.Logs[0:i+1] //delete entries following
+		for ;newLogsIndex<len(args.Entries);i++ {
 			newLogsIndex++
 			rf.Logs[i]=args.Entries[newLogsIndex]
 		}
@@ -394,7 +380,6 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf.VotedFor = -1
 	rf.Logs=make([]LogEntry,10)
 	rf.Logs = append(rf.Logs,LogEntry{-1,nil})
-	rf.CurrentIndex=0
 
 	rf.CommitedIndex = 0
 	rf.LastApplied = 0

@@ -31,7 +31,7 @@ func (rf *Raft) LeaderSendAppendEntries() {
 				}
 				if reply.Term > rf.CurrentTerm { //if any follower's Term is bigger than leader's now,switch to Follower
 					rf.mu.Lock()
-					rf.switchToFollower()
+					rf.switchToFollower(reply.Term)
 					rf.mu.Unlock()
 				} else {
 					if reply.Success {//if replicate on follower peerIndex succeed,update matchIndex\nextIndex and send 1 to countCH
@@ -48,7 +48,7 @@ func (rf *Raft) LeaderSendAppendEntries() {
 	}
 
 	smallestReplicatedIndex :=0
-	for count:=1;count<len(rf.peers)/2;count++ { //if a majority of  followers appendentry succeed,get the smallest matchindex
+	for count:=0;count<len(rf.peers)/2;count++ { //if a majority of  followers appendentry succeed,get the smallest matchindex
 		replicatedIndex:=<-countCh
 		if replicatedIndex<smallestReplicatedIndex {
 			smallestReplicatedIndex = replicatedIndex

@@ -5,6 +5,7 @@ import (
 )
 
 func (rf *Raft) FollowerCron() {
+	rf.resetElectionTimeout()
 	for  {
 		if rf.Sstate != Follower {
 			break;
@@ -42,7 +43,7 @@ func (rf *Raft) switchToCandidate() {
 			voteArgs := RequestVoteArgs{}
 			voteArgs.CandidateId = rf.me
 			voteArgs.Term = rf.CurrentTerm
-			voteArgs.LastLogIndex = len(rf.Logs) //logs first index is 1
+			voteArgs.LastLogIndex = len(rf.Logs)-1
 			voteArgs.LastLogTerm = rf.Logs[voteArgs.LastLogIndex].Term
 			reply := new(RequestVoteReply)
 			requestResult:=rf.sendRequestVote(peerIndex, voteArgs, reply)
@@ -60,8 +61,7 @@ func (rf *Raft) switchToCandidate() {
 			reply := <-rvChan
 			if reply.Term>rf.CurrentTerm {
 				//todo:need to add lock here,but don't know how to do
-				rf.CurrentTerm = reply.Term
-				rf.switchToFollower()
+				rf.switchToFollower(reply.Term)
 				break
 			}
 			if reply.VoteGranted {
@@ -78,8 +78,8 @@ func (rf *Raft) switchToCandidate() {
 
 	rf.resetElectionTimeout() //reset election timeout config
 	select {
-	case <-rf.heartBeatCh:   //valid rpc request received ,switch to Follower,the sender make sure args.Term>=currentTerm
-		rf.switchToFollower()
+	case term:=<-rf.heartBeatCh:   //valid rpc request received ,switch to Follower,the sender make sure args.Term>=currentTerm
+		rf.switchToFollower(term)
 	case electionResult:=<-winCh:  // election wins, switch to leader
 		if electionResult {
 			rf.switchToLeader()
