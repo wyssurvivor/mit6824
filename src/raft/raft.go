@@ -250,12 +250,13 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	rf.heartBeatCh<-1
+
 	reply.Term = rf.CurrentTerm
 	if args.Term<rf.CurrentTerm {
 		reply.Success=false
 		return
 	} else {
+		rf.heartBeatCh<-1
 		if args.Term > rf.CurrentTerm {
 			rf.CurrentTerm = args.Term
 			rf.Sstate = Follower
@@ -354,7 +355,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}()
 
 	go func(){
-		rf.serverStateMonite()
+		rf.FollowerCron()
 	}()
 	return index, term, isLeader
 }
@@ -415,18 +416,6 @@ persister *Persister, applyCh chan ApplyMsg) *Raft {
 
 // my code below
 
-func (rf *Raft) serverStateMonite() {
-
-	for {
-		select {
-		case <-rf.heartBeatCh:
-			rf.resetElectionTimeout()
-		case <-time.After(time.Millisecond * time.Duration(rf.ElectionTimeout)):
-			rf.resetElectionTimeout()
-			rf.switchToCandidate()
-		}
-	}
-}
 
 //this function should be executed in a single goroutine and only that goroutine
 //can execute this func
@@ -449,63 +438,7 @@ func (rf *Raft) applyLogEntry() {
 	}
 }
 
-func (rf *Raft) switchToCandidate() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.Sstate == Leader {
-		return
-	}
-	rf.Sstate = Candidate
-	rf.CurrentTerm++
-	rf.VotedFor = rf.me
-	//rf.resetElectionTimeout()
-	rvChan := make(chan *RequestVoteReply, len(rf.peers) - 1)
-	termTmp := rf.CurrentTerm
-	for index, _ := range rf.peers {
-		peerIndex := index
-		if peerIndex == rf.me {
-			continue
-		}
-		go func() {
-			voteArgs := RequestVoteArgs{}
-			voteArgs.CandidateId = rf.me
-			voteArgs.Term = rf.CurrentTerm
-			voteArgs.LastLogIndex = rf.CurrentIndex
-			voteArgs.LastLogTerm = rf.Logs[rf.CurrentIndex].Term
-			reply := new(RequestVoteReply)
-			rf.sendRequestVote(peerIndex, voteArgs, reply)
-			rvChan <- reply
-		}()
-	}
 
-	totalVote := 1 //vote itself
-
-	for iter := 0; iter < len(rf.peers)-1; iter++ {
-		reply := <-rvChan
-		if reply.Term>rf.CurrentTerm {
-			rf.CurrentTerm = reply.Term
-			rf.Sstate = Follower
-			return
-		}
-		if reply.VoteGranted {
-			totalVote++
-		}
-	}
-
-	if termTmp == rf.CurrentTerm && rf.Sstate != Leader {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		if termTmp < rf.CurrentTerm || rf.Sstate == Leader {
-			return
-		}
-
-		if totalVote > len(rf.peers)/2 {
-			rf.Sstate = Leader
-			rf.sendHeartBeatToAllOthers()
-		}
-	}
-
-}
 
 func (rf *Raft) sendHeartBeatToAllOthers() {
 	for i := 0; i < len(rf.peers); i++ {
@@ -540,9 +473,10 @@ func (rf *Raft) checkAndUpdate(term int) bool {
 
 // need to add locks beyond this function
 func (rf *Raft) resetElectionTimeout() {
-	rf.ElectionTimeout = rand.Intn(400) + 500
+	rf.ElectionTimeout = rand.Intn(400) + 600
 	//rf.ElectionTimestamp = getMilliSeconds()
 }
+
 
 func getMilliSeconds() int64 {
 	return time.Now().Round(time.Millisecond).UnixNano() / (int64(time.Millisecond) / int64(time.Nanosecond))

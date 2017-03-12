@@ -4,7 +4,7 @@ import "time"
 
 const LEADER_HEARTBEAT_TIMEOUT = 300 // must be smaller than ElectionTimeout,or a follower will switch to candidate
 
-func (rf *Raft) leaderSendAppendEntries() {
+func (rf *Raft) LeaderSendAppendEntries() {
 	countCh:=make(chan int ,len(rf.peers))
 
 	for index,_:=range rf.peers {
@@ -31,11 +31,11 @@ func (rf *Raft) leaderSendAppendEntries() {
 				}
 				if reply.Term > rf.CurrentTerm { //if any follower's Term is bigger than leader's now,switch to Follower
 					rf.mu.Lock()
-					rf.Sstate = Follower
+					rf.switchToFollower()
 					rf.mu.Unlock()
 				} else {
 					if reply.Success {//if replicate on follower peerIndex succeed,update matchIndex\nextIndex and send 1 to countCH
-						rf.updateNextIndexAndMatchIndex(args.PrevLogIndex+len(args.Entries), peerIndex)
+						rf.UpdateNextIndexAndMatchIndex(args.PrevLogIndex+len(args.Entries), peerIndex)
 						countCh<-rf.MatchIndex[peerIndex]
 						break
 					} else { // if failed,decret nextIndex and retry.no need to add locks here
@@ -55,11 +55,11 @@ func (rf *Raft) leaderSendAppendEntries() {
 		}
 	}
 
-	rf.updateCommitIndex(smallestReplicatedIndex)
+	rf.UpdateCommitIndex(smallestReplicatedIndex)
 
 }
 
-func (rf *Raft) updateNextIndexAndMatchIndex(matchIndex int,peerIndex int ) {
+func (rf *Raft) UpdateNextIndexAndMatchIndex(matchIndex int,peerIndex int ) {
 	rf.mu.Lock()
 	if(matchIndex>rf.MatchIndex[peerIndex]) {
 		rf.MatchIndex[peerIndex] = matchIndex
@@ -68,7 +68,7 @@ func (rf *Raft) updateNextIndexAndMatchIndex(matchIndex int,peerIndex int ) {
 	rf.mu.Unlock()
 }
 
-func (rf *Raft) updateCommitIndex(index int) {
+func (rf *Raft) UpdateCommitIndex(index int) {
 	rf.mu.Lock()
 
 	if index>rf.CommitedIndex && rf.Logs[index].Term == rf.CurrentTerm{ //if index is bigger than committedInde now and term is equal
@@ -78,9 +78,18 @@ func (rf *Raft) updateCommitIndex(index int) {
 }
 
 // run this function in a single goroutine when a server is switched to leader
-func (rf *Raft) leaderCron() {
-	select {
-	case <-time.After(time.Millisecond*time.Duration(LEADER_HEARTBEAT_TIMEOUT)):
-		rf.leaderSendAppendEntries()
+func (rf *Raft) LeaderCron() {
+	rf.LeaderSendAppendEntries()// send heart beat request to all followers on changing to Leader
+	for   {
+		select {
+		case <-time.After(time.Millisecond*time.Duration(LEADER_HEARTBEAT_TIMEOUT)):
+			if rf.Sstate!=Leader {
+				break
+			}
+			rf.LeaderSendAppendEntries()
+		}
 	}
+
 }
+
+
