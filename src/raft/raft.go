@@ -88,6 +88,8 @@ type Raft struct {
 	heartBeatCh chan int
 	HeartBeatTimeout  int
 
+	LeaderId int
+
 	// Your data here.
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -247,6 +249,7 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 		return
 	} else {
 		rf.heartBeatCh<-1
+		rf.LeaderId = args.LeaderId
 
 		if args.PrevLogIndex>0 && args.PrevLogIndex <len(rf.Logs) {
 			if rf.Logs[args.PrevLogIndex].Term != args.PrevLogTerm {
